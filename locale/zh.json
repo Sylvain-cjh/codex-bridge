@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex 桥接",
+    "description": "通过本地带口令的 HTTP 端点，把 DSH 会话暴露给 Codex CLI。"
+  }
+}
