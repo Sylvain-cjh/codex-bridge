@@ -4,6 +4,33 @@
 
 核心约定：每一跳都是单向投递。发送方写进对方能取到的地方就返回，自己的 turn 到此为止；接收方下次运行时来取。没有长轮询，没有「等回复」。
 
+## 安装
+
+1. 把本仓库放到任意目录，记为 `$BRIDGE`。
+2. 在 DSH 的 profile（如 `~/.dsh/profiles/desktop/package.json`）里加入本地依赖并挂载：
+
+   ```json
+   {
+     "dependencies": { "@local/dsh-codex-bridge": "link:$BRIDGE" },
+     "dsh": { "profile": { "bundles": ["@local/dsh-codex-bridge"] } }
+   }
+   ```
+
+3. 在 `~/.codex/config.toml` 注册 MCP：
+
+   ```toml
+   [mcp_servers.dsh]
+   command = "node"
+   args = ["$BRIDGE/mcp/dsh-bridge-mcp.mjs"]
+   startup_timeout_sec = 20
+   ```
+
+4. 重启 DSH，让 Host 插件注册 `/codex-bridge` 路由；新建一个 Codex 会话，让它加载 MCP。
+
+> 首次运行会在 `~/.dsh-codex-bridge/` 下生成 `token` 与 `endpoint`，两者都是本机凭据，**不要提交**。仓库已用 `.gitignore` 排除。
+
+下文命令里的 `D:/deepseek-harness/default-workspace/codex-bridge` 是作者本机路径，请替换为你的 `$BRIDGE`。
+
 ## 两种投递方向
 
 | 方向 | 通道 | 谁取 |
