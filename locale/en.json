@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex Bridge",
+    "description": "Exposes DSH sessions to Codex CLI over a local token-guarded HTTP endpoint."
+  }
+}
