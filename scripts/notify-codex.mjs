@@ -15,7 +15,7 @@
  *   --session <id> → 与 --cwd（默认当前目录）匹配的最新 Codex 会话 → 不投提醒，只留队列
  */
 import { spawnSync } from 'node:child_process'
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -29,6 +29,7 @@ let text = ''
 let topic = 'default'
 let cwd = process.cwd()
 let session = null
+let purpose = ''
 let queueOnly = false
 let dryRun = false
 
@@ -38,6 +39,7 @@ for (let i = 0; i < argv.length; i += 1) {
   else if (arg === '--topic') topic = argv[++i] ?? topic
   else if (arg === '--cwd') cwd = argv[++i] ?? cwd
   else if (arg === '--session') session = argv[++i] ?? null
+  else if (arg === '--purpose') purpose = argv[++i] ?? ''
   else if (arg === '--queue-only') queueOnly = true
   else if (arg === '--dry-run') dryRun = true
   else if (!arg.startsWith('--') && text.length === 0) text = arg
@@ -103,15 +105,31 @@ async function findSessionForCwd(targetCwd) {
   return null
 }
 
-// 1) 写队列
-mkdirSync(QUEUE_DIR, { recursive: true })
+// 1) 写队列（按 scope 分目录，实现会话间硬隔离）
+const scope = (purpose || 'backend').trim()
+const scopeDir = join(QUEUE_DIR, scope)
+mkdirSync(scopeDir, { recursive: true })
 const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-const message = { id, topic, from: 'dsh', to: 'codex', at: Date.now(), text, replyExpected: false, status: 'pending' }
-const file = join(QUEUE_DIR, `${id}.json`)
+const message = { id, topic, scope, from: 'dsh', to: 'codex', at: Date.now(), text, replyExpected: false, status: 'pending' }
+const file = join(scopeDir, `${id}.json`)
 
 // 2) 解析目标会话并投递提醒
-const target = session ?? (await findSessionForCwd(cwd))
-const notice = `【DSH 有新消息】主题 ${topic}。请调用 MCP 工具 dsh_inbox 取消息并处理，处理完用 dsh_ack 归档。`
+// 优先级：DSH_CODEX_SESSION 环境变量 > --session 参数 > 按用途固定的会话文件 > 默认固定会话 > 按 cwd 自动匹配。
+// --purpose ui 会读 codex-session-ui，用于把测试控制台这类工作分到独立对话。
+function readPinnedSession(name) {
+  try {
+    const p = join(BRIDGE_DIR, name ? `codex-session-${name}` : 'codex-session')
+    return existsSync(p) ? readFileSync(p, 'utf8').trim() : ''
+  } catch {
+    return ''
+  }
+}
+const target = process.env.DSH_CODEX_SESSION
+  || session
+  || (purpose ? readPinnedSession(purpose) : '')
+  || readPinnedSession('')
+  || (await findSessionForCwd(cwd))
+const notice = `【DSH 有新消息】主题 ${topic}，队列 scope=${scope}。请调用 MCP 工具 dsh_inbox({ scope: "${scope}" }) 取消息；处理完用 dsh_ack({ ids: [...], scope: "${scope}" }) 归档。只处理本 scope，勿读取其他 scope。`
 
 if (dryRun) {
   console.log(JSON.stringify({

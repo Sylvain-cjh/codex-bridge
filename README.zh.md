@@ -83,6 +83,48 @@ node D:/deepseek-harness/default-workspace/codex-bridge/scripts/notify-codex.mjs
 
 脚本位置：`scripts/notify-codex.mjs`。
 
+### 多会话隔离（scope）
+
+同一台机器上可能有多个 Codex 会话各管一摊事。队列按 **scope** 分目录，互不可见：
+
+```
+~/.dsh-codex-bridge/queue/
+  backend/   ← 后端业务会话
+  ui/        ← 测试控制台会话
+  default/   ← 旧版无 scope 的消息
+```
+
+发送时指定 scope 与目标会话：
+
+```bash
+# 发给后端会话（默认 scope=backend）
+node scripts/notify-codex.mjs --topic B06 --text "..." --cwd /path/to/project
+
+# 发给控制台会话（scope=ui，读 codex-session-ui 里的会话 id）
+node scripts/notify-codex.mjs --purpose ui --topic CONSOLE-1 --text "..."
+```
+
+接收方必须带同一个 scope，否则读不到（读别的 scope 也是空）：
+
+```json
+{ "name": "dsh_inbox", "arguments": { "scope": "ui" } }
+{ "name": "dsh_ack",   "arguments": { "ids": ["..."], "scope": "ui" } }
+```
+
+- `--purpose ui` 会读 `~/.dsh-codex-bridge/codex-session-ui` 作为目标会话，并写入 `queue/ui/`。
+- 不传 `--purpose` 时 scope 为 `backend`，目标会话读 `codex-session`。
+- 旧的无线程目录消息仍可按 `scope=default` 读取，不会丢。
+- **scope 是硬隔离**：控制台会话拿不到后端任务，反之亦然。
+
+### 会话固定文件
+
+| 文件 | 用途 |
+| --- | --- |
+| `~/.dsh-codex-bridge/codex-session` | 默认会话（后端业务） |
+| `~/.dsh-codex-bridge/codex-session-ui` | 控制台专用会话 |
+
+优先级：`DSH_CODEX_SESSION` 环境变量 > `--session` 参数 > 对应 purpose 的文件 > 默认文件 > 按 cwd 自动匹配。
+
 ### Codex 取 DSH 投来的消息
 
 Codex 一启动会先调 `dsh_inbox`（MCP 的 `initialize` 里已经写了这条指令）。取到的消息标记为 `delivered` 但留在队列里，处理完用 `dsh_ack` 归档，不会丢。

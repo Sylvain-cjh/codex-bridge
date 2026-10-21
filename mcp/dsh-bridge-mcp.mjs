@@ -62,19 +62,39 @@ async function callBridge(pathname, init = {}) {
 }
 
 // ---------------------------------------------------------------- queue files
+//
+// 队列按 scope 分目录，实现硬隔离：backend 与 ui 两个 Codex 会话各读各的，
+// 不会取到对方的任务。旧版无子目录的消息留在 queue/ 根下，归入 default。
 
-/** Read every queued message, newest last. Missing directory means an empty queue. */
-function readQueue(topic) {
-  mkdirSync(QUEUE_DIR, { recursive: true })
-  const files = readdirSync(QUEUE_DIR).filter((name) => name.endsWith('.json')).sort()
+const QUEUE_ROOT = QUEUE_DIR
+
+/** 某个 scope 的队列目录；scope 为空表示 default。 */
+function queueDir(scope) {
+  const name = typeof scope === 'string' && scope.trim() ? scope.trim() : 'default'
+  return join(QUEUE_ROOT, name)
+}
+
+/** 读出某 scope 下的消息；同时兼容根目录里的旧消息（default）。 */
+function readQueue(scope, topic) {
+  const dirs = [queueDir(scope)]
+  const name = typeof scope === 'string' && scope.trim() ? scope.trim() : 'default'
+  if (name === 'default') dirs.push(QUEUE_ROOT) // 旧版消息
   const messages = []
-  for (const file of files) {
-    try {
-      const message = JSON.parse(readFileSync(join(QUEUE_DIR, file), 'utf8'))
-      if (topic !== undefined && topic !== '' && message.topic !== topic) continue
-      messages.push({ ...message, file })
-    } catch {
-      // A corrupt entry must not hide the rest of the queue.
+  for (const dir of dirs) {
+    if (!existsSync(dir)) {
+      try { mkdirSync(dir, { recursive: true }) } catch { /* 只读失败时按空队列处理 */ }
+      continue
+    }
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort()
+    for (const file of files) {
+      try {
+        const message = JSON.parse(readFileSync(join(dir, file), 'utf8'))
+        if (topic !== undefined && topic !== '' && message.topic !== topic) continue
+        if (dir !== queueDir(name)) message.legacy = true
+        messages.push({ ...message, file, dir })
+      } catch {
+        // 单条损坏不影响其余消息
+      }
     }
   }
   return messages
@@ -83,18 +103,26 @@ function readQueue(topic) {
 /** Mark a message as picked up without removing it, so nothing is lost mid-turn. */
 function markDelivered(message) {
   const next = { ...message, status: 'delivered', deliveredAt: Date.now() }
+  const dir = message.dir || queueDir('default')
   delete next.file
-  writeFileSync(join(QUEUE_DIR, message.file), `${JSON.stringify(next, null, 2)}\n`)
+  delete next.dir
+  writeFileSync(join(dir, message.file), `${JSON.stringify(next, null, 2)}\n`)
   return next
 }
 
 /** Move finished messages out of the queue so the inbox stays small. */
-function archive(id) {
-  mkdirSync(DONE_DIR, { recursive: true })
+function archive(id, scope) {
   const file = `${id}.json`
-  const source = join(QUEUE_DIR, file)
-  if (!existsSync(source)) return false
-  renameSync(source, join(DONE_DIR, file))
+  const candidates = [
+    join(queueDir(scope), file),
+    join(queueDir('default'), file),
+    join(QUEUE_ROOT, file), // 旧版位置
+  ]
+  const source = candidates.find((p) => existsSync(p))
+  if (!source) return false
+  const doneDir = join(DONE_DIR, typeof scope === 'string' && scope.trim() ? scope.trim() : 'default')
+  mkdirSync(doneDir, { recursive: true })
+  renameSync(source, join(doneDir, file))
   return true
 }
 
@@ -104,11 +132,15 @@ const TOOLS = [
   {
     name: 'dsh_inbox',
     description:
-      'Read messages that DSH queued for Codex while no Codex session was running. Call this at the start of a session, before doing anything else. Returns pending messages (oldest first); each is marked delivered but stays in the queue until dsh_ack. An empty list means there is nothing waiting and you can stop.',
+      'Read messages that DSH queued for this Codex conversation. Call this at the start of a session, before doing anything else. The queue is isolated by scope: pass the scope this conversation owns ("backend" for the backend/contract line, "ui" for the API console line). Without scope it reads "default", which old messages may still use. Returns pending messages (oldest first); each is marked delivered but stays in the queue until dsh_ack. An empty list means nothing is waiting for this scope.',
     inputSchema: {
       type: 'object',
       properties: {
-        topic: { type: 'string', description: 'Optional topic filter, e.g. "DSH-007". Omit for every topic.' },
+        scope: {
+          type: 'string',
+          description: 'Queue scope owned by this conversation: "backend" or "ui". Omit only for legacy "default" messages.',
+        },
+        topic: { type: 'string', description: 'Optional topic filter, e.g. "B06-KICKOFF". Omit for every topic.' },
       },
       additionalProperties: false,
     },
@@ -124,6 +156,10 @@ const TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description: 'Message ids returned by dsh_inbox.',
+        },
+        scope: {
+          type: 'string',
+          description: 'Same scope used for dsh_inbox ("backend" or "ui"). Omit for legacy "default" messages.',
         },
       },
       required: ['ids'],
@@ -207,20 +243,23 @@ function textResult(value) {
 async function callTool(name, args) {
   switch (name) {
     case 'dsh_inbox': {
-      const pending = readQueue(args?.topic).filter((message) => message.status === 'pending')
+      const scope = typeof args?.scope === 'string' ? args.scope : ''
+      const pending = readQueue(scope, args?.topic).filter((message) => message.status === 'pending')
       return textResult({
+        scope: scope || 'default',
         count: pending.length,
         messages: pending.map(markDelivered),
         hint:
           pending.length === 0
-            ? 'Queue is empty. Nothing to pick up.'
-            : 'Act on these, then call dsh_ack with their ids.',
+            ? 'Queue is empty for this scope. Nothing to pick up.'
+            : 'Act on these, then call dsh_ack with their ids and the same scope.',
       })
     }
     case 'dsh_ack': {
       const ids = Array.isArray(args?.ids) ? args.ids : []
-      const archived = ids.filter((id) => archive(id))
-      return textResult({ acked: archived, missing: ids.filter((id) => !archived.includes(id)) })
+      const scope = typeof args?.scope === 'string' ? args.scope : ''
+      const archived = ids.filter((id) => archive(id, scope))
+      return textResult({ scope: scope || 'default', acked: archived, missing: ids.filter((id) => !archived.includes(id)) })
     }
     case 'dsh_post_message': {
       if (!args?.sessionId) throw new Error('sessionId is required')

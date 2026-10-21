@@ -19,6 +19,7 @@ const QUEUE_DIR = join(BRIDGE_DIR, 'queue')
 const argv = process.argv.slice(2)
 let text = ''
 let topic = 'default'
+let scope = 'default'
 let expectReply = false
 let from = 'dsh'
 let filePath = null
@@ -30,6 +31,9 @@ for (let index = 0; index < argv.length; index += 1) {
     index += 1
   } else if (arg === '--topic') {
     topic = argv[index + 1] ?? topic
+    index += 1
+  } else if (arg === '--scope') {
+    scope = argv[index + 1] ?? scope
     index += 1
   } else if (arg === '--from') {
     from = argv[index + 1] ?? from
@@ -49,6 +53,9 @@ for (let index = 0; index < argv.length; index += 1) {
 
 if (filePath !== null) text = readFileSync(filePath, 'utf8')
 
+// 队列按 scope 分目录；listQueue 和写入都依赖它，必须先定义
+const scopeDir = join(QUEUE_DIR, scope)
+
 if (text.trim().length === 0) {
   console.error('queue-post: empty message. Pass --text "..." or --file <path>.')
   process.exit(2)
@@ -57,27 +64,28 @@ if (text.trim().length === 0) {
 function listQueue() {
   let files = []
   try {
-    files = readdirSync(QUEUE_DIR).filter((name) => name.endsWith('.json')).sort()
+    files = readdirSync(scopeDir).filter((name) => name.endsWith('.json')).sort()
   } catch {
-    console.log('queue is empty')
+    console.log(`queue is empty (scope=${scope})`)
     return
   }
   if (files.length === 0) {
-    console.log('queue is empty')
+    console.log(`queue is empty (scope=${scope})`)
     return
   }
   for (const file of files) {
-    const message = JSON.parse(readFileSync(join(QUEUE_DIR, file), 'utf8'))
-    console.log(`[${message.status}] ${message.id}  topic=${message.topic}  from=${message.from}  reply=${message.replyExpected}`)
+    const message = JSON.parse(readFileSync(join(scopeDir, file), 'utf8'))
+    console.log(`[${message.status}] ${message.id}  scope=${message.scope || scope}  topic=${message.topic}  from=${message.from}  reply=${message.replyExpected}`)
     console.log(`  ${message.text.split('\n')[0].slice(0, 160)}`)
   }
 }
 
-mkdirSync(QUEUE_DIR, { recursive: true })
+mkdirSync(scopeDir, { recursive: true })
 const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 const message = {
   id,
   topic,
+  scope,
   from,
   to: from === 'dsh' ? 'codex' : 'dsh',
   at: Date.now(),
@@ -85,6 +93,6 @@ const message = {
   replyExpected: expectReply,
   status: 'pending',
 }
-writeFileSync(join(QUEUE_DIR, `${id}.json`), `${JSON.stringify(message, null, 2)}\n`)
+writeFileSync(join(scopeDir, `${id}.json`), `${JSON.stringify(message, null, 2)}\n`)
 
 console.log(JSON.stringify({ queued: true, id, topic, replyExpected: expectReply, queueDir: QUEUE_DIR }))
